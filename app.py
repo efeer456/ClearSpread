@@ -90,6 +90,14 @@ with tab_signal:
 
         opinions = card.get("analyst_opinions")
         if opinions:
+            def _reviewer_badge(o):
+                r = o.get("_reviewer", {})
+                if r.get("status") == "approved" and r.get("revisions", 0) > 0:
+                    return f"🔁 reviewer requested {r['revisions']} revision(s)"
+                if r.get("status") == "skipped":
+                    return "⏭️ no data, reviewer skipped"
+                return "✅ passed reviewer on first try"
+
             with st.expander("Analyst Perspectives (3 independent agents, before synthesis)", expanded=True):
                 ac1, ac2, ac3 = st.columns(3)
                 with ac1:
@@ -97,16 +105,19 @@ with tab_signal:
                     o = opinions["news"]
                     st.markdown(f"{o['sentiment'].upper()} · conf {o['confidence']}/100")
                     st.caption(o["reasoning"])
+                    st.caption(_reviewer_badge(o))
                 with ac2:
                     st.markdown("**📄 Filings Analyst**")
                     o = opinions["filings"]
                     st.markdown(f"{o['sentiment'].upper()} · conf {o['confidence']}/100")
                     st.caption(f"Insider activity: {o['insider_direction']}. {o['reasoning']}")
+                    st.caption(_reviewer_badge(o))
                 with ac3:
                     st.markdown("**📈 Price Analyst**")
                     o = opinions["price"]
                     st.markdown(f"{o['momentum_bias'].upper()} · conf {o['confidence']}/100")
                     st.caption(o["reasoning"])
+                    st.caption(_reviewer_badge(o))
                 sentiments = {opinions["news"]["sentiment"], opinions["filings"]["sentiment"],
                               opinions["price"]["momentum_bias"]}
                 if len(sentiments) > 1:

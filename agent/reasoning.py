@@ -10,10 +10,21 @@ Every Gemini call uses forced structured function-calling (tool_config
 mode=ANY), never free text, so every agent's output is auditable and
 consistently shaped. Calls are retried automatically since the live model
 has shown transient 503 "high demand" errors during testing.
+
+Actor-Critic pattern: every agent's raw JSON is run through a deterministic
+(non-LLM) Reviewer before it's accepted. The Reviewer never judges the
+substance of an opinion - only that the output actually satisfies the
+schema (valid enum values, confidence in range, reasoning not empty/trivial).
+If it doesn't, the same agent is re-prompted with the specific validation
+errors (REJECT_WITH_FEEDBACK) up to MAX_REVISIONS times; if it still can't
+produce a valid answer, that counts as FAIL and the exception propagates.
+Kept deterministic on purpose - a second LLM call per node would double
+Gemini traffic and, given the transient 503s already observed live, add
+fragility for no real benefit on the happy path.
 """
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from google import genai
 from google.genai import types
@@ -22,9 +33,12 @@ from config import GEMINI_API_KEY, GEMINI_MODEL
 
 _client = genai.Client(api_key=GEMINI_API_KEY)
 
+MAX_REVISIONS = 2
 
-def _call_with_retry(prompt: str, tool: types.Tool, function_name: str,
-                      retries: int = 3, delay: float = 6.0) -> Dict:
+
+def _call_gemini(prompt: str, tool: types.Tool, function_name: str,
+                  retries: int = 3, delay: float = 6.0) -> Dict:
+    """Raw call with retry on transient API errors only (not validation)."""
     last_error = None
     for attempt in range(retries):
         try:
@@ -54,6 +68,49 @@ def _call_with_retry(prompt: str, tool: types.Tool, function_name: str,
     raise RuntimeError(f"{function_name} failed after {retries} attempts: {last_error}")
 
 
+def _run_reviewed(prompt: str, tool: types.Tool, function_name: str,
+                   validate) -> Dict:
+    """
+    Actor-Critic loop: Worker (Gemini) produces JSON, Reviewer (validate())
+    checks it deterministically. APPROVE -> return. REJECT_WITH_FEEDBACK ->
+    re-prompt with the specific problems, up to MAX_REVISIONS times.
+    FAIL -> raise, after MAX_REVISIONS exhausted.
+    """
+    current_prompt = prompt
+    for revision in range(MAX_REVISIONS + 1):
+        output = _call_gemini(current_prompt, tool, function_name)
+        problems = validate(output)
+        if not problems:
+            output["_reviewer"] = {"status": "approved", "revisions": revision}
+            return output
+        current_prompt = prompt + f"""
+
+Your previous answer failed review for these reasons:
+{chr(10).join('- ' + p for p in problems)}
+
+Re-emit a corrected, COMPLETE answer via the same function call - fix every issue above.
+"""
+    raise RuntimeError(f"{function_name}: FAIL - reviewer rejected {MAX_REVISIONS} revisions, "
+                        f"last problems: {problems}")
+
+
+def _validate_common(opinion: Dict) -> List[str]:
+    problems = []
+    conf = opinion.get("confidence")
+    if not isinstance(conf, (int, float)) or not (0 <= conf <= 100):
+        problems.append(f"confidence must be a number 0-100, got {conf!r}")
+    reasoning = (opinion.get("reasoning") or "").strip()
+    if len(reasoning) < 15:
+        problems.append("reasoning is missing or too short to be a real justification (min 15 chars)")
+    return problems
+
+
+def _enum_problem(opinion: Dict, field: str, allowed: tuple) -> Optional[str]:
+    if opinion.get(field) not in allowed:
+        return f"{field} must be one of {allowed}, got {opinion.get(field)!r}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # News Analyst - sees ONLY headlines
 # ---------------------------------------------------------------------------
@@ -78,10 +135,21 @@ NEWS_ANALYST_FUNCTION = types.FunctionDeclaration(
 NEWS_ANALYST_TOOL = types.Tool(function_declarations=[NEWS_ANALYST_FUNCTION])
 
 
+def _validate_news_opinion(opinion: Dict) -> List[str]:
+    problems = _validate_common(opinion)
+    p = _enum_problem(opinion, "sentiment", ("bullish", "bearish", "neutral"))
+    if p:
+        problems.append(p)
+    if not isinstance(opinion.get("key_headlines"), list):
+        problems.append("key_headlines must be a list of strings")
+    return problems
+
+
 def _analyze_news(symbol: str, news_items: List[Dict]) -> Dict:
     if not news_items:
         return {"sentiment": "neutral", "confidence": 0,
-                "reasoning": "No recent news found.", "key_headlines": []}
+                "reasoning": "No recent news found.", "key_headlines": [],
+                "_reviewer": {"status": "skipped", "reason": "no data"}}
     lines = [f"- [{n.get('created_at')}] {n.get('headline')} (source: {n.get('source')})"
              for n in news_items]
     prompt = f"""You are a news sentiment analyst. You have ONLY the headlines below for
@@ -90,7 +158,7 @@ def _analyze_news(symbol: str, news_items: List[Dict]) -> Dict:
 NEWS:
 {chr(10).join(lines)}
 """
-    return _call_with_retry(prompt, NEWS_ANALYST_TOOL, "emit_news_opinion")
+    return _run_reviewed(prompt, NEWS_ANALYST_TOOL, "emit_news_opinion", _validate_news_opinion)
 
 
 # ---------------------------------------------------------------------------
@@ -118,10 +186,22 @@ FILINGS_ANALYST_FUNCTION = types.FunctionDeclaration(
 FILINGS_ANALYST_TOOL = types.Tool(function_declarations=[FILINGS_ANALYST_FUNCTION])
 
 
+def _validate_filings_opinion(opinion: Dict) -> List[str]:
+    problems = _validate_common(opinion)
+    p = _enum_problem(opinion, "sentiment", ("bullish", "bearish", "neutral"))
+    if p:
+        problems.append(p)
+    p = _enum_problem(opinion, "insider_direction", ("buying", "selling", "mixed", "none"))
+    if p:
+        problems.append(p)
+    return problems
+
+
 def _analyze_filings(symbol: str, filings: List[Dict]) -> Dict:
     if not filings:
         return {"sentiment": "neutral", "confidence": 0,
-                "reasoning": "No recent SEC filings found.", "insider_direction": "none"}
+                "reasoning": "No recent SEC filings found.", "insider_direction": "none",
+                "_reviewer": {"status": "skipped", "reason": "no data"}}
     lines = [f"- [{f.get('filed_at')}] {f.get('form')} - {f.get('company')}" for f in filings]
     prompt = f"""You are an SEC filings analyst. You have ONLY the filings below for {symbol} -
 no news, no price data. Judge sentiment purely from these filings, paying particular
@@ -130,7 +210,7 @@ attention to any Form 4 insider buying/selling pattern.
 FILINGS:
 {chr(10).join(lines)}
 """
-    return _call_with_retry(prompt, FILINGS_ANALYST_TOOL, "emit_filings_opinion")
+    return _run_reviewed(prompt, FILINGS_ANALYST_TOOL, "emit_filings_opinion", _validate_filings_opinion)
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +234,21 @@ PRICE_ANALYST_FUNCTION = types.FunctionDeclaration(
 PRICE_ANALYST_TOOL = types.Tool(function_declarations=[PRICE_ANALYST_FUNCTION])
 
 
+def _validate_price_opinion(opinion: Dict) -> List[str]:
+    problems = _validate_common(opinion)
+    p = _enum_problem(opinion, "momentum_bias", ("bullish", "bearish", "neutral"))
+    if p:
+        problems.append(p)
+    if not isinstance(opinion.get("already_priced_in"), bool):
+        problems.append(f"already_priced_in must be a boolean, got {opinion.get('already_priced_in')!r}")
+    return problems
+
+
 def _analyze_price(symbol: str, price_context: Dict) -> Dict:
     if not price_context.get("available"):
         return {"momentum_bias": "neutral", "already_priced_in": False,
-                "confidence": 0, "reasoning": "No price data available."}
+                "confidence": 0, "reasoning": "No price data available.",
+                "_reviewer": {"status": "skipped", "reason": "no data"}}
     prompt = f"""You are a price/volume momentum analyst. You have ONLY the data below for
 {symbol} - no news, no filings. Judge momentum bias and whether a move already looks
 priced in (a large price change on low relative volume suggests the news behind it is
@@ -166,7 +257,7 @@ NOT yet reflected; a large move on high relative volume suggests it likely alrea
 PRICE/VOLUME CONTEXT:
 {price_context}
 """
-    return _call_with_retry(prompt, PRICE_ANALYST_TOOL, "emit_price_opinion")
+    return _run_reviewed(prompt, PRICE_ANALYST_TOOL, "emit_price_opinion", _validate_price_opinion)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +307,30 @@ DECISION_CARD_FUNCTION = types.FunctionDeclaration(
 
 DECISION_CARD_TOOL = types.Tool(function_declarations=[DECISION_CARD_FUNCTION])
 
+_EVENT_TYPES = ("earnings", "insider_activity", "regulatory", "product", "macro", "litigation", "other")
+
+
+def _validate_decision_card(card: Dict) -> List[str]:
+    problems = []
+    conf = card.get("confidence_score")
+    if not isinstance(conf, (int, float)) or not (0 <= conf <= 100):
+        problems.append(f"confidence_score must be a number 0-100, got {conf!r}")
+    if len((card.get("event_summary") or "").strip()) < 15:
+        problems.append("event_summary is missing or too short")
+    p = _enum_problem(card, "event_type", _EVENT_TYPES)
+    if p:
+        problems.append(p)
+    p = _enum_problem(card, "sentiment", ("bullish", "bearish", "neutral"))
+    if p:
+        problems.append(p)
+    if not isinstance(card.get("already_priced_in"), bool):
+        problems.append(f"already_priced_in must be a boolean, got {card.get('already_priced_in')!r}")
+    if not isinstance(card.get("reasoning_steps"), list) or not card["reasoning_steps"]:
+        problems.append("reasoning_steps must be a non-empty list of strings")
+    if not isinstance(card.get("risk_flags"), list):
+        problems.append("risk_flags must be a list (can be empty)")
+    return problems
+
 
 def build_decision_card(symbol: str, news_items: List[Dict], filings: List[Dict],
                          price_context: Dict) -> Dict:
@@ -258,7 +373,7 @@ Rules:
   give strong reason to override it.
 """
 
-    card = _call_with_retry(prompt, DECISION_CARD_TOOL, "emit_decision_card")
+    card = _run_reviewed(prompt, DECISION_CARD_TOOL, "emit_decision_card", _validate_decision_card)
     card["symbol"] = symbol
     card["sources"] = {"news": news_items, "filings": filings, "price_context": price_context}
     card["analyst_opinions"] = {

@@ -29,7 +29,10 @@ alpaca_cli.py            -> subprocess wrapper around Alpaca's official CLI (git
 agent/market_context.py  -> recent price/volume for "already priced in?" checks (Alpaca CLI: data bars)
 agent/reasoning.py       -> 3 independent Analyst agents (News/Filings/Price) + 1 Critic
                              agent that synthesizes them into a structured Decision Card
-                             (Gemini, forced function-calling, never free text)
+                             (Gemini, forced function-calling, never free text). Each
+                             agent's output passes a deterministic Reviewer before being
+                             accepted (Actor-Critic pattern) - invalid output gets
+                             re-prompted with specific feedback, up to 2 revisions.
 agent/options_strategy.py-> sentiment -> defined-risk debit spread (Alpaca CLI: data option chain)
 trading/executor.py      -> ONLY called post-approval: Alpaca CLI (order submit --order-class mleg)
 storage/audit_log.py     -> SQLite: decision + human action + execution history, plus a
