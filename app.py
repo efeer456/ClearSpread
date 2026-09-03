@@ -1,16 +1,16 @@
 """
-Seffaf, Insan-Onayli OSINT Trading Agent
-=========================================
-Alpaca AI Trading Agents Hackathon (Options Alpha Agents track) icin.
+Transparent, Human-Approved OSINT Trading Agent
+=================================================
+For the Alpaca AI Trading Agents Hackathon (Options Alpha Agents track).
 
-Akis:
-  1) OSINT topla (Alpaca News + SEC EDGAR)
-  2) Gemini ile yapisal, denetlenebilir bir 'Karar Karti' uret
-  3) Sinyale gore tanimli-riskli bir opsiyon stratejisi oner (debit spread)
-  4) Insan onayi olmadan HICBIR emir gonderilmez
-  5) Her adim SQLite denetim izine (audit trail) kaydedilir
+Flow:
+  1) Gather OSINT (Alpaca News + SEC EDGAR)
+  2) Generate a structured, auditable 'Decision Card' with Gemini
+  3) Propose a defined-risk options strategy based on the signal (debit spread)
+  4) NO order is ever submitted without human approval
+  5) Every step is logged to the SQLite audit trail
 
-Calistirmak icin:  streamlit run app.py
+To run:  streamlit run app.py
 """
 import streamlit as st
 
@@ -26,33 +26,33 @@ from storage.audit_log import (
     record_execution, get_full_audit_trail,
 )
 
-st.set_page_config(page_title="Seffaf OSINT Trading Agent", layout="wide")
+st.set_page_config(page_title="Transparent OSINT Trading Agent", layout="wide")
 init_db()
 
 if "pending" not in st.session_state:
     st.session_state.pending = None  # {"card_id", "card", "strategy"}
 
-st.title("Seffaf & Insan-Onayli OSINT Opsiyon Ajani")
+st.title("Transparent & Human-Approved OSINT Options Agent")
 st.caption(
-    "Her karar; kaynagina, akil yurutmesine ve guven skoruna kadar izlenebilir. "
-    "Hicbir emir, siz onaylamadan gonderilmez."
+    "Every decision is traceable down to its sources, its reasoning, and its confidence score. "
+    "No order is ever submitted without your approval."
 )
 
-tab_signal, tab_audit = st.tabs(["Yeni Sinyal", "Denetim Izi"])
+tab_signal, tab_audit = st.tabs(["New Signal", "Audit Trail"])
 
 # --------------------------------------------------------------------------
-# TAB 1: Yeni sinyal uret
+# TAB 1: Generate a new signal
 # --------------------------------------------------------------------------
 with tab_signal:
     col_input, _ = st.columns([1, 2])
     with col_input:
-        symbol = st.selectbox("Sembol", options=WATCHLIST, index=0)
-        custom = st.text_input("...veya baska bir sembol gir", "")
+        symbol = st.selectbox("Symbol", options=WATCHLIST, index=0)
+        custom = st.text_input("...or enter a different symbol", "")
         if custom.strip():
             symbol = custom.strip().upper()
 
-        if st.button("OSINT Topla ve Analiz Et", type="primary"):
-            with st.spinner(f"{symbol} icin OSINT toplaniyor ve Gemini analiz ediyor..."):
+        if st.button("Collect OSINT and Analyze", type="primary"):
+            with st.spinner(f"Collecting OSINT for {symbol} and running Gemini analysis..."):
                 news_items = fetch_recent_news(symbol, lookback_hours=48, limit=8)
                 filings = fetch_material_events(symbol, days_back=21) + \
                     fetch_insider_filings(symbol, days_back=21)
@@ -76,22 +76,22 @@ with tab_signal:
 
         st.divider()
         sentiment_color = {"bullish": "green", "bearish": "red", "neutral": "gray"}[card["sentiment"]]
-        st.subheader(f"Karar Karti #{card_id} — {card['symbol']}")
+        st.subheader(f"Decision Card #{card_id} — {card['symbol']}")
         c1, c2, c3 = st.columns(3)
         c1.metric("Sentiment", card["sentiment"].upper())
-        c2.metric("Guven Skoru", f"{card['confidence_score']}/100")
-        c3.metric("Fiyata Yansimis mi?", "Evet" if card["already_priced_in"] else "Hayir")
+        c2.metric("Confidence Score", f"{card['confidence_score']}/100")
+        c3.metric("Already Priced In?", "Yes" if card["already_priced_in"] else "No")
 
-        st.markdown(f"**Ozet:** {card['event_summary']}")
+        st.markdown(f"**Summary:** {card['event_summary']}")
 
-        with st.expander("Akil Yurutme Adimlari (denetim icin)"):
+        with st.expander("Reasoning Steps (for audit)"):
             for i, step in enumerate(card["reasoning_steps"], 1):
                 st.markdown(f"{i}. {step}")
 
         if card["risk_flags"]:
-            st.warning("Risk Bayraklari: " + "; ".join(card["risk_flags"]))
+            st.warning("Risk Flags: " + "; ".join(card["risk_flags"]))
 
-        with st.expander("Kaynaklar (OSINT)"):
+        with st.expander("Sources (OSINT)"):
             sources = card.get("sources", {})
             for n in sources.get("news", []):
                 st.markdown(f"- [{n['headline']}]({n['url']}) — {n.get('source', '')}")
@@ -102,70 +102,70 @@ with tab_signal:
         st.divider()
 
         if strategy:
-            st.markdown(f"### Onerilen Strateji: {strategy['strategy_name']}")
+            st.markdown(f"### Proposed Strategy: {strategy['strategy_name']}")
             for leg in strategy["legs"]:
                 st.markdown(f"- **{leg['action'].upper()}** {leg['type']} @ strike {leg['strike']} ({leg['symbol']})")
             sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("Kontrat basi max kayip", f"${strategy['max_loss_per_contract']:.2f}")
-            sc2.metric("Kontrat basi max kazanc", f"${strategy['max_gain_per_contract']:.2f}")
-            sc3.metric("Basabas noktasi", f"${strategy['breakeven']:.2f}")
+            sc1.metric("Max loss per contract", f"${strategy['max_loss_per_contract']:.2f}")
+            sc2.metric("Max gain per contract", f"${strategy['max_gain_per_contract']:.2f}")
+            sc3.metric("Breakeven", f"${strategy['breakeven']:.2f}")
 
             qty = st.number_input(
-                "Kontrat adedi", min_value=1, max_value=20, value=strategy["quantity_suggested"]
+                "Contract quantity", min_value=1, max_value=20, value=strategy["quantity_suggested"]
             )
             est_risk = strategy["max_loss_per_contract"] * qty
-            st.caption(f"Tahmini toplam risk: ${est_risk:.2f} (limit: ${MAX_NOTIONAL_PER_TRADE:.2f})")
+            st.caption(f"Estimated total risk: ${est_risk:.2f} (limit: ${MAX_NOTIONAL_PER_TRADE:.2f})")
 
             b1, b2 = st.columns(2)
-            if b1.button("✅ Onayla ve Paper Hesapta Gonder", type="primary"):
+            if b1.button("✅ Approve and Submit to Paper Account", type="primary"):
                 result = submit_debit_spread(strategy, quantity=qty)
                 if result["submitted"]:
                     record_human_action(card_id, "approve", f"qty={qty}")
                     record_execution(card_id, result, qty)
-                    st.success(f"Emir gonderildi. Order ID: {result['order_id']} (status: {result['status']})")
+                    st.success(f"Order submitted. Order ID: {result['order_id']} (status: {result['status']})")
                 else:
                     record_human_action(card_id, "approve_blocked", f"qty={qty} - {result['reason']}")
                     st.error(result["reason"])
                 st.session_state.pending = None
 
-            note = b2.text_input("Red gerekcesi (opsiyonel)", key="reject_note")
-            if b2.button("❌ Reddet"):
+            note = b2.text_input("Rejection reason (optional)", key="reject_note")
+            if b2.button("❌ Reject"):
                 record_human_action(card_id, "reject", note)
-                st.info("Karar reddedildi ve denetim izine kaydedildi. Hicbir emir gonderilmedi.")
+                st.info("Decision rejected and logged to the audit trail. No order was submitted.")
                 st.session_state.pending = None
         else:
             st.info(
-                "Sentiment 'neutral' oldugu ya da fiyat verisi eksik oldugu icin "
-                "bu basit strateji seti bir islem onermiyor. Yine de karar denetim izine kaydedildi."
+                "This simple strategy set proposes no trade because sentiment is 'neutral' "
+                "or price data is unavailable. The decision was still logged to the audit trail."
             )
-            if st.button("Onayla (islem yok, sadece kayit)"):
+            if st.button("Acknowledge (no trade, log only)"):
                 record_human_action(card_id, "acknowledge", "")
                 st.session_state.pending = None
 
 # --------------------------------------------------------------------------
-# TAB 2: Denetim izi
+# TAB 2: Audit trail
 # --------------------------------------------------------------------------
 with tab_audit:
-    st.subheader("Tam Denetim Izi")
-    st.caption("Kaynak -> Analiz -> Insan Karari -> Emir zincirinin degismez kaydi.")
+    st.subheader("Full Audit Trail")
+    st.caption("Immutable record of the Source -> Analysis -> Human Decision -> Order chain.")
     trail = get_full_audit_trail()
     if not trail:
-        st.info("Henuz kayitli bir karar yok.")
+        st.info("No decisions logged yet.")
     for entry in trail:
         c = entry["card"]
         with st.container(border=True):
             st.markdown(
                 f"**#{c['id']} · {c['symbol']} · {c['sentiment'].upper()} · "
-                f"guven {c['confidence_score']}/100** — _{c['created_at']}_"
+                f"confidence {c['confidence_score']}/100** — _{c['created_at']}_"
             )
             st.markdown(c["event_summary"])
             if entry["actions"]:
                 for a in entry["actions"]:
-                    st.markdown(f"→ Insan aksiyonu: **{a['action']}** ({a['acted_at']}) {a.get('note') or ''}")
+                    st.markdown(f"→ Human action: **{a['action']}** ({a['acted_at']}) {a.get('note') or ''}")
             else:
-                st.markdown("→ Henuz insan aksiyonu yok (bekliyor).")
+                st.markdown("→ No human action yet (pending).")
             for e in entry["executions"]:
                 st.markdown(
-                    f"→ Emir gonderildi: `{e['order_id']}` durum={e['status']} "
-                    f"adet={e['quantity']} limit=${e['limit_price']}"
+                    f"→ Order submitted: `{e['order_id']}` status={e['status']} "
+                    f"qty={e['quantity']} limit=${e['limit_price']}"
                 )
