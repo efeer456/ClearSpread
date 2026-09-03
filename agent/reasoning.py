@@ -1,10 +1,10 @@
 """
-Toplanan OSINT verisini (haber + SEC filing + fiyat baglami) Gemini'a vererek
-seffaf, denetlenebilir bir 'Karar Karti' (decision card) uretir.
+Feeds the collected OSINT data (news + SEC filings + price context) to Gemini
+to produce a transparent, auditable 'Decision Card'.
 
-Onemli tasarim karari: Gemini'dan serbest metin degil, zorunlu bir "function call"
-seklinde yapisal JSON istiyoruz (tool_config mode=ANY). Bu, her karar kartinin ayni
-sablonda, denetlenebilir ve UI'da tutarli sekilde gosterilebilir olmasini saglar.
+Key design choice: instead of free text, we force Gemini into a structured
+JSON "function call" (tool_config mode=ANY). This guarantees every decision
+card follows the same template, is auditable, and renders consistently in the UI.
 """
 from typing import Dict, List
 
@@ -17,13 +17,13 @@ _client = genai.Client(api_key=GEMINI_API_KEY)
 
 DECISION_CARD_FUNCTION = types.FunctionDeclaration(
     name="emit_decision_card",
-    description="Yapilandirilmis, seffaf bir OSINT analiz karti uretir.",
+    description="Produces a structured, transparent OSINT analysis card.",
     parameters={
         "type": "OBJECT",
         "properties": {
             "event_summary": {
                 "type": "STRING",
-                "description": "Olayin kendi cumlelerinle 2-3 cumlelik ozeti. Kaynaktan birebir alinti yapma.",
+                "description": "A 2-3 sentence summary of the event in your own words. Do not quote the source verbatim.",
             },
             "event_type": {
                 "type": "STRING",
@@ -35,21 +35,21 @@ DECISION_CARD_FUNCTION = types.FunctionDeclaration(
             "sentiment": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
             "confidence_score": {
                 "type": "INTEGER",
-                "description": "0-100 arasi: bu sinyalin ticaret kararina temel olacak kadar guvenilir olma derecesi",
+                "description": "0-100: how reliable this signal is as a basis for a trading decision",
             },
             "already_priced_in": {
                 "type": "BOOLEAN",
-                "description": "Son fiyat/hacim hareketine bakildiginda bilginin piyasaya zaten yansimis olma ihtimali",
+                "description": "Whether recent price/volume action suggests the information is already reflected in the market",
             },
             "reasoning_steps": {
                 "type": "ARRAY",
                 "items": {"type": "STRING"},
-                "description": "Karara adim adim nasil varildigini aciklayan kisa, sirali cumleler (denetim izi icin)",
+                "description": "Short, ordered sentences explaining step by step how the decision was reached (for the audit trail)",
             },
             "risk_flags": {
                 "type": "ARRAY",
                 "items": {"type": "STRING"},
-                "description": "Dikkat edilmesi gereken riskler: dusuk hacim, tek kaynak, olasi manipulasyon vb.",
+                "description": "Risks worth flagging: low volume, single source, possible manipulation, etc.",
             },
         },
         "required": [
@@ -65,42 +65,43 @@ DECISION_CARD_TOOL = types.Tool(function_declarations=[DECISION_CARD_FUNCTION])
 def _format_sources(news_items: List[Dict], filings: List[Dict]) -> str:
     lines = []
     if news_items:
-        lines.append("HABERLER:")
+        lines.append("NEWS:")
         for n in news_items:
-            lines.append(f"- [{n.get('created_at')}] {n.get('headline')} (kaynak: {n.get('source')}, url: {n.get('url')})")
+            lines.append(f"- [{n.get('created_at')}] {n.get('headline')} (source: {n.get('source')}, url: {n.get('url')})")
     if filings:
-        lines.append("\nRESMI SEC BASVURULARI:")
+        lines.append("\nOFFICIAL SEC FILINGS:")
         for f in filings:
             lines.append(f"- [{f.get('filed_at')}] {f.get('form')} - {f.get('company')} (url: {f.get('url')})")
     if not lines:
-        lines.append("(Bu sembol icin son donemde OSINT kaynagi bulunamadi.)")
+        lines.append("(No OSINT sources found for this symbol recently.)")
     return "\n".join(lines)
 
 
 def build_decision_card(symbol: str, news_items: List[Dict], filings: List[Dict],
                          price_context: Dict) -> Dict:
     """
-    Gemini'i bir arastirma analisti gibi calistirip yapisal bir karar karti dondurur.
-    Donen dict, DECISION_CARD_FUNCTION semasina uyar + 'symbol' ve 'sources' eklenir.
+    Runs Gemini as a research analyst and returns a structured decision card.
+    The returned dict matches the DECISION_CARD_FUNCTION schema plus 'symbol' and 'sources'.
     """
     sources_text = _format_sources(news_items, filings)
 
-    prompt = f"""Sen dikkatli, sekpetik bir finansal arastirma analistisin. Asagida {symbol}
-hissesi icin toplanan OSINT (acik kaynak istihbarati) verisini ve son fiyat/hacim
-baglamini goreceksin. Gorevin bunlari degerlendirip yapisal bir karar karti uretmek.
+    prompt = f"""You are a careful, skeptical financial research analyst. Below you will find
+the OSINT (open-source intelligence) data collected for {symbol} stock, along with
+recent price/volume context. Your task is to evaluate this and produce a structured
+decision card.
 
-Kurallar:
-- Kaynaklardan BIREBIR alinti yapma, kendi cumlelerinle ozetle.
-- Eger veri zayifsa (tek kaynak, eski tarih, dusuk hacim) bunu risk_flags icinde belirt
-  ve confidence_score'u dusuk tut.
-- already_priced_in alanini price_context'teki yuzde degisim ve hacim oranina bakarak degerlendir:
-  buyuk bir fiyat hareketi zaten gerceklesmisse haber byuk olasilikla fiyatlanmistir.
-- reasoning_steps, baska bir insanin senin mantik zincirini takip edebilecegi kadar acik olmali.
+Rules:
+- Do NOT quote sources verbatim; summarize in your own words.
+- If the data is weak (single source, stale date, low volume), flag this in risk_flags
+  and keep confidence_score low.
+- Judge already_priced_in from the percent change and volume ratio in price_context:
+  if a large price move has already happened, the news is likely already priced in.
+- reasoning_steps should be clear enough that another person can follow your chain of logic.
 
-OSINT KAYNAKLARI:
+OSINT SOURCES:
 {sources_text}
 
-FIYAT/HACIM BAGLAMI:
+PRICE/VOLUME CONTEXT:
 {price_context}
 """
 
@@ -127,4 +128,4 @@ FIYAT/HACIM BAGLAMI:
                 card["sources"] = {"news": news_items, "filings": filings, "price_context": price_context}
                 return card
 
-    raise RuntimeError("Gemini yapisal bir karar karti dondurmedi.")
+    raise RuntimeError("Gemini did not return a structured decision card.")
