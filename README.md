@@ -1,80 +1,80 @@
-# Şeffaf & İnsan-Onaylı OSINT Opsiyon Ajanı
+# Transparent, Human-Approved OSINT Options Agent
 
-**Alpaca AI Trading Agents Hackathon** (lablab.ai) — *Options Alpha Agents* track için.
+For the **Alpaca AI Trading Agents Hackathon** (lablab.ai) — *Options Alpha Agents* track.
 
-## Fikir
+## Idea
 
-Çoğu ekip "haberi çek → agent yorumlasın → otomatik trade et" akışını kuruyor.
-Bu proje bilinçli olarak farklı bir yerde duruyor: **hız yerine denetlenebilirlik**.
+Most teams build "pull a headline → let the agent interpret it → auto-trade" pipelines.
+This project deliberately stands somewhere else: **auditability over speed**.
 
-- Her karar; hangi OSINT kaynağına (Alpaca News + SEC EDGAR Form 4/8-K), hangi
-  akıl yürütme adımlarına ve hangi güven skoruna dayandığı açıkça gösterilen bir
-  **"Karar Kartı"** olarak üretilir.
-- Agent asla kendi başına emir göndermez. Her opsiyon stratejisi, kullanıcı
-  **Approve** demeden çalıştırılmaz.
-- Sadece **tanımlı riskli** (defined-risk) stratejiler önerilir (debit call/put
-  spread) — max kayıp önceden bilinir, "naked" opsiyon satışı desteklenmez.
-- Her adım (kaynak → analiz → insan kararı → emir) SQLite'ta değişmez şekilde
-  loglanır ve "Denetim İzi" sekmesinde bir zaman çizelgesi olarak gösterilir.
+- Every decision is produced as a **"Decision Card"** that clearly shows which OSINT
+  sources it's based on (Alpaca News + SEC EDGAR Form 4/8-K filings), what reasoning
+  steps were followed, and what confidence score it got.
+- The agent never submits an order on its own. No options strategy is ever executed
+  until the user clicks **Approve**.
+- Only **defined-risk** strategies are proposed (debit call/put spreads) — max loss is
+  known up front; "naked" option selling is not supported.
+- Every step (source → analysis → human decision → order) is logged immutably to
+  SQLite and rendered as a timeline in the "Audit Trail" tab.
 
-## Mimari
+## Architecture
 
 ```
-osint/alpaca_news.py     -> Alpaca NewsClient ile ticker bazlı haber
+osint/alpaca_news.py     -> ticker-scoped headlines via Alpaca's NewsClient
 osint/sec_edgar.py       -> SEC EDGAR full-text search (Form 4 / 8-K)
-alpaca_cli.py            -> Resmi Alpaca CLI (github.com/alpacahq/cli) subprocess sarmalayıcısı
-agent/market_context.py  -> "fiyata zaten yansımış mı?" için son fiyat/hacim (Alpaca CLI: data bars)
-agent/reasoning.py       -> Gemini, zorunlu function-call ile yapısal Karar Kartı üretir
-agent/options_strategy.py-> Sentiment'e göre debit spread önerisi (Alpaca CLI: data option chain)
-trading/executor.py      -> SADECE onay sonrası: Alpaca CLI (order submit --order-class mleg)
-storage/audit_log.py     -> SQLite: karar + insan aksiyonu + emir geçmişi
-app.py                   -> Streamlit arayüzü (Approve/Reject + Denetim İzi)
+alpaca_cli.py            -> subprocess wrapper around Alpaca's official CLI (github.com/alpacahq/cli)
+agent/market_context.py  -> recent price/volume for "already priced in?" checks (Alpaca CLI: data bars)
+agent/reasoning.py       -> Gemini, forced function-call -> structured Decision Card
+agent/options_strategy.py-> sentiment -> defined-risk debit spread (Alpaca CLI: data option chain)
+trading/executor.py      -> ONLY called post-approval: Alpaca CLI (order submit --order-class mleg)
+storage/audit_log.py     -> SQLite: decision + human action + execution history
+app.py                   -> Streamlit UI (Approve/Reject + Audit Trail tab)
 ```
 
-Hackathon kuralı gereği (Alpaca'nın MCP server'ı veya CLI'sinin kullanılması zorunlu),
-piyasa verisi ve emir gönderme dahil tüm trading akışı doğrudan `alpaca-py` SDK'sı
-yerine resmi **Alpaca CLI**'ye subprocess çağrılarıyla yapılıyor (`alpaca_cli.py`).
-`alpaca-py` sadece `osint/alpaca_news.py`'da haber çekmek için kullanılıyor (OSINT
-katmanı, trading katmanı değil).
+Per the hackathon's rules (use of Alpaca's MCP server or CLI is mandatory), the entire
+trading flow — market data and order submission included — goes through Alpaca's
+official **CLI** via subprocess calls (`alpaca_cli.py`) instead of the raw `alpaca-py`
+SDK. `alpaca-py` is only used in `osint/alpaca_news.py` to fetch headlines (the OSINT
+layer, not the trading layer).
 
-## Kurulum
+## Setup
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # sonra kendi anahtarlarinizi girin
+cp .env.example .env   # then fill in your own keys
 streamlit run app.py
 ```
 
-Gereken anahtarlar:
+Keys you'll need:
 - **Alpaca paper trading** API key/secret (dashboard → Paper Trading → API Keys).
-  Opsiyon işlemleri için hesabınızda options trading seviyesinin onaylı olması gerekir.
+  Your account needs options trading level approved for options orders to work.
 - **Gemini API key** (aistudio.google.com/apikey)
-- SEC EDGAR için key gerekmez, sadece gerçek bir iletişim bilgisi (`SEC_EDGAR_USER_AGENT`)
-  istiyorlar (fair-access politikası).
+- SEC EDGAR needs no key, just a real contact string (`SEC_EDGAR_USER_AGENT`) per
+  their fair-access policy.
 
-Ayrıca **Alpaca CLI**'nin kurulu olması gerekir:
+You'll also need the **Alpaca CLI** installed:
 ```bash
-go install github.com/alpacahq/cli/cmd/alpaca@latest   # ya da: brew install alpacahq/tap/cli
+go install github.com/alpacahq/cli/cmd/alpaca@latest   # or: brew install alpacahq/tap/cli
 ```
-PATH'e ekliyse `.env`'de `ALPACA_CLI_PATH=alpaca` yeterli; değilse tam yolu verin
-(Windows için hazır binary: [GitHub Releases](https://github.com/alpacahq/cli/releases)).
+If it's on your PATH, `ALPACA_CLI_PATH=alpaca` in `.env` is enough; otherwise give the
+full path (prebuilt Windows binary: [GitHub Releases](https://github.com/alpacahq/cli/releases)).
 
-## Bilinçli sınırlamalar (2 günlük hackathon kapsamı)
+## Known limitations (2-day hackathon scope)
 
-- Strateji seti şu an sadece **debit call/put spread**. Iron condor, credit
-  spread gibi stratejiler zaman kalırsa `agent/options_strategy.py`'a eklenebilir.
-- SEC EDGAR araması sembol yerine şirket adıyla yapılıyor (full-text search
-  API'si böyle çalışıyor); ticker → şirket adı eşlemesi basit tutuldu, gerekirse
-  `company_tickers.json` ile geliştirilebilir.
-- ~~Stretch goal: MCP/CLI entegrasyonu~~ — tamamlandı: tüm trading/data akışı
-  artık `alpaca-py` SDK yerine resmi Alpaca CLI üzerinden çalışıyor (`alpaca_cli.py`).
+- The strategy set is currently **debit call/put spreads only**. Iron condors, credit
+  spreads, etc. could be added to `agent/options_strategy.py` given more time.
+- SEC EDGAR search matches by company name rather than ticker symbol (that's how the
+  full-text search API works); the ticker → company-name mapping is kept simple and
+  could be strengthened with `company_tickers.json`.
+- ~~Stretch goal: MCP/CLI integration~~ — done: all trading/data calls now go through
+  the official Alpaca CLI instead of the `alpaca-py` SDK (`alpaca_cli.py`).
 
-## Demo akışı (jüri için)
+## Demo flow (for judges)
 
-1. "Denetim İzi" sekmesi boşken başla.
-2. Bir sembol seç, "OSINT Topla ve Analiz Et" butonuna bas → Karar Kartı ekranda
-   kaynaklarıyla, akıl yürütmesiyle ve güven skoruyla birlikte belirir.
-3. Önerilen stratejiyi incele, kontrat adedini ayarla.
-4. Approve veya Reject'e bas → sonucu "Denetim İzi" sekmesinde göster.
-5. Vurgu cümlesi: *"Bu ajan hiçbir zaman sizin onayınız olmadan piyasaya
-   dokunmuyor — ve attığı her adım geriye dönük olarak denetlenebilir."*
+1. Start with the "Audit Trail" tab empty.
+2. Pick a symbol, click "Collect OSINT and Analyze" → a Decision Card appears on
+   screen with its sources, reasoning steps, and confidence score.
+3. Review the proposed strategy, adjust the contract quantity.
+4. Click Approve or Reject → show the result in the "Audit Trail" tab.
+5. Closing line: *"This agent never touches the market without your approval — and
+   every step it takes is auditable after the fact."*
