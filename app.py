@@ -23,7 +23,7 @@ from agent.options_strategy import propose_debit_spread
 from trading.executor import submit_debit_spread
 from storage.audit_log import (
     init_db, save_decision_card, record_human_action,
-    record_execution, get_full_audit_trail,
+    record_execution, get_full_audit_trail, verify_ledger,
 )
 
 st.set_page_config(page_title="Transparent OSINT Trading Agent", layout="wide")
@@ -88,6 +88,32 @@ with tab_signal:
             for i, step in enumerate(card["reasoning_steps"], 1):
                 st.markdown(f"{i}. {step}")
 
+        opinions = card.get("analyst_opinions")
+        if opinions:
+            with st.expander("Analyst Perspectives (3 independent agents, before synthesis)", expanded=True):
+                ac1, ac2, ac3 = st.columns(3)
+                with ac1:
+                    st.markdown("**📰 News Analyst**")
+                    o = opinions["news"]
+                    st.markdown(f"{o['sentiment'].upper()} · conf {o['confidence']}/100")
+                    st.caption(o["reasoning"])
+                with ac2:
+                    st.markdown("**📄 Filings Analyst**")
+                    o = opinions["filings"]
+                    st.markdown(f"{o['sentiment'].upper()} · conf {o['confidence']}/100")
+                    st.caption(f"Insider activity: {o['insider_direction']}. {o['reasoning']}")
+                with ac3:
+                    st.markdown("**📈 Price Analyst**")
+                    o = opinions["price"]
+                    st.markdown(f"{o['momentum_bias'].upper()} · conf {o['confidence']}/100")
+                    st.caption(o["reasoning"])
+                sentiments = {opinions["news"]["sentiment"], opinions["filings"]["sentiment"],
+                              opinions["price"]["momentum_bias"]}
+                if len(sentiments) > 1:
+                    st.warning("⚠️ The three analysts did not fully agree — see the Critic's synthesis below for how this was resolved.")
+                else:
+                    st.success("✅ All three analysts independently agreed.")
+
         if card["risk_flags"]:
             st.warning("Risk Flags: " + "; ".join(card["risk_flags"]))
 
@@ -148,6 +174,17 @@ with tab_signal:
 with tab_audit:
     st.subheader("Full Audit Trail")
     st.caption("Immutable record of the Source -> Analysis -> Human Decision -> Order chain.")
+
+    if st.button("🔒 Verify Ledger Integrity"):
+        result = verify_ledger()
+        if result["valid"]:
+            st.success(
+                f"Ledger intact: {result['entries']} hash-chained entries verified, "
+                f"chain head `{result['last_hash'][:16]}...`."
+            )
+        else:
+            st.error(f"Ledger tampered! Chain breaks at entry #{result['broken_at_id']} ({result['entry_type']}).")
+
     trail = get_full_audit_trail()
     if not trail:
         st.info("No decisions logged yet.")
