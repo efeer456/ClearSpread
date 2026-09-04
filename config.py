@@ -18,7 +18,16 @@ WATCHLIST = [t.strip().upper() for t in os.getenv("WATCHLIST", "AAPL,TSLA,NVDA")
 DB_PATH = os.path.join(os.path.dirname(__file__), "audit_trail.db")
 
 # Gemini ile analiz icin kullanilacak model (gerekirse .env'de GEMINI_MODEL ile ezilebilir)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+
+# Gemini'nin ucretsiz katmaninda kota MODEL BASINA gunluk sayiliyor. Bir sinyal
+# 4 ajan cagrisi harcadigi icin tek modele bagli kalmak analizi ortasinda
+# durdurabiliyor; kota/erisim hatasinda sirayla bu modellere dusuyoruz.
+GEMINI_FALLBACK_MODELS = [
+    m.strip() for m in os.getenv(
+        "GEMINI_FALLBACK_MODELS", "gemini-3.5-flash,gemini-3.6-flash"
+    ).split(",") if m.strip()
+]
 
 # Riski sinirlamak icin: bir emirde harcanacak maksimum notional (paper hesapta bile)
 MAX_NOTIONAL_PER_TRADE = 500.0

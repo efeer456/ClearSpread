@@ -29,43 +29,63 @@ from typing import Dict, List, Optional
 from google import genai
 from google.genai import types
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS
 
 _client = genai.Client(api_key=GEMINI_API_KEY)
 
 MAX_REVISIONS = 2
 
 
+def _is_quota_error(err: Exception) -> bool:
+    """429 (kota doldu) veya 404 (model bu hesaba kapali) -> ayni modeli tekrar
+    denemenin anlami yok, dogrudan yedek modele gecmeliyiz."""
+    text = str(err)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text or "404" in text
+
+
 def _call_gemini(prompt: str, tool: types.Tool, function_name: str,
                   retries: int = 3, delay: float = 6.0) -> Dict:
-    """Raw call with retry on transient API errors only (not validation)."""
+    """Raw call with retry on transient API errors only (not validation).
+
+    Ucretsiz katmanda gunluk kota MODEL BASINA sayildigi icin, kota hatasinda
+    ayni modelde beklemek yerine sonraki modele gecilir (GEMINI_FALLBACK_MODELS).
+    """
     last_error = None
-    for attempt in range(retries):
-        try:
-            response = _client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[tool],
-                    tool_config=types.ToolConfig(
-                        function_calling_config=types.FunctionCallingConfig(
-                            mode="ANY",
-                            allowed_function_names=[function_name],
-                        )
-                    ),
-                ),
-            )
-            for candidate in response.candidates or []:
-                for part in candidate.content.parts:
-                    fc = getattr(part, "function_call", None)
-                    if fc and fc.name == function_name:
-                        return dict(fc.args)
-            raise RuntimeError(f"Gemini did not call {function_name}")
-        except Exception as e:
-            last_error = e
-            if attempt < retries - 1:
-                time.sleep(delay)
-    raise RuntimeError(f"{function_name} failed after {retries} attempts: {last_error}")
+    for model in [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS:
+        for attempt in range(retries):
+            try:
+                return _generate(model, prompt, tool, function_name)
+            except Exception as e:
+                last_error = e
+                if _is_quota_error(e):
+                    break          # bu model bitti, sonraki modele gec
+                if attempt < retries - 1:
+                    time.sleep(delay)
+    raise RuntimeError(f"{function_name} failed after trying "
+                       f"{[GEMINI_MODEL] + GEMINI_FALLBACK_MODELS}: {last_error}")
+
+
+def _generate(model: str, prompt: str, tool: types.Tool, function_name: str) -> Dict:
+    """Tek bir forced-function-call cagrisi. Hatalari cagirana firlatir."""
+    response = _client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[tool],
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowed_function_names=[function_name],
+                )
+            ),
+        ),
+    )
+    for candidate in response.candidates or []:
+        for part in candidate.content.parts:
+            fc = getattr(part, "function_call", None)
+            if fc and fc.name == function_name:
+                return dict(fc.args)
+    raise RuntimeError(f"Gemini did not call {function_name}")
 
 
 def _run_reviewed(prompt: str, tool: types.Tool, function_name: str,
