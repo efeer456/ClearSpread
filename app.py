@@ -12,6 +12,8 @@ Flow:
 
 To run:  streamlit run app.py
 """
+import json
+
 import streamlit as st
 
 from config import WATCHLIST, MAX_NOTIONAL_PER_TRADE
@@ -42,6 +44,16 @@ tab_signal, tab_audit = st.tabs(["New Signal", "Audit Trail"])
 
 # --------------------------------------------------------------------------
 # TAB 1: Generate a new signal
+def _loads(raw):
+    """DB'deki JSON kolonlarini cozer; bos/bozuk kayitta None doner."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 # --------------------------------------------------------------------------
 with tab_signal:
     col_input, _ = st.columns([1, 2])
@@ -153,31 +165,52 @@ with tab_signal:
             est_risk = strategy["max_loss_per_contract"] * qty
             st.caption(f"Estimated total risk: ${est_risk:.2f} (limit: ${MAX_NOTIONAL_PER_TRADE:.2f})")
 
-            b1, b2 = st.columns(2)
-            if b1.button("✅ Approve and Submit to Paper Account", type="primary"):
-                result = submit_debit_spread(strategy, quantity=qty)
-                if result["submitted"]:
-                    record_human_action(card_id, "approve", f"qty={qty}")
-                    record_execution(card_id, result, qty)
-                    st.success(f"Order submitted. Order ID: {result['order_id']} (status: {result['status']})")
-                else:
-                    record_human_action(card_id, "approve_blocked", f"qty={qty} - {result['reason']}")
-                    st.error(result["reason"])
-                st.session_state.pending = None
+            # Karar verildikten sonra kart ekranda KALIR (sadece butonlar kalkar).
+            # Onceden pending sifirlandigi icin kart, risk flag'leri ve strateji
+            # aninda yok oluyordu; kullanici neyi onayladigini goremiyordu.
+            decided = st.session_state.pending.get("decided")
+            if decided:
+                {"success": st.success, "error": st.error, "info": st.info}[decided["kind"]](decided["text"])
+            else:
+                b1, b2 = st.columns(2)
+                if b1.button("✅ Approve and Submit to Paper Account", type="primary"):
+                    result = submit_debit_spread(strategy, quantity=qty)
+                    if result["submitted"]:
+                        record_human_action(card_id, "approve", f"qty={qty}")
+                        record_execution(card_id, result, qty)
+                        st.session_state.pending["decided"] = {
+                            "kind": "success",
+                            "text": (f"Order submitted. Order ID: {result['order_id']} "
+                                     f"(status: {result['status']})"),
+                        }
+                    else:
+                        record_human_action(card_id, "approve_blocked", f"qty={qty} - {result['reason']}")
+                        st.session_state.pending["decided"] = {"kind": "error", "text": result["reason"]}
+                    st.rerun()
 
-            note = b2.text_input("Rejection reason (optional)", key="reject_note")
-            if b2.button("❌ Reject"):
-                record_human_action(card_id, "reject", note)
-                st.info("Decision rejected and logged to the audit trail. No order was submitted.")
-                st.session_state.pending = None
+                note = b2.text_input("Rejection reason (optional)", key="reject_note")
+                if b2.button("❌ Reject"):
+                    record_human_action(card_id, "reject", note)
+                    st.session_state.pending["decided"] = {
+                        "kind": "info",
+                        "text": "Decision rejected and logged to the audit trail. No order was submitted.",
+                    }
+                    st.rerun()
         else:
             st.info(
                 "This simple strategy set proposes no trade because sentiment is 'neutral' "
                 "or price data is unavailable. The decision was still logged to the audit trail."
             )
-            if st.button("Acknowledge (no trade, log only)"):
+            decided = st.session_state.pending.get("decided")
+            if decided:
+                st.info(decided["text"])
+            elif st.button("Acknowledge (no trade, log only)"):
                 record_human_action(card_id, "acknowledge", "")
-                st.session_state.pending = None
+                st.session_state.pending["decided"] = {
+                    "kind": "info",
+                    "text": "Acknowledged. Logged to the audit trail, no order submitted.",
+                }
+                st.rerun()
 
 # --------------------------------------------------------------------------
 # TAB 2: Audit trail
@@ -207,6 +240,49 @@ with tab_audit:
                 f"confidence {c['confidence_score']}/100** — _{c['created_at']}_"
             )
             st.markdown(c["event_summary"])
+
+            # Karar kartinin TAMAMI burada gorunmeli - risk flag'leri, analist
+            # gorusleri ve onerilen strateji DB'de zaten duruyor; ozet satirini
+            # gostermek 'her adim denetlenebilir' vaadini karsilamiyor.
+            risk_flags = _loads(c.get("risk_flags")) or []
+            if risk_flags:
+                st.warning("Risk Flags: " + "; ".join(risk_flags))
+
+            opinions = _loads(c.get("analyst_opinions")) or {}
+            if opinions:
+                with st.expander("Analyst Perspectives (3 independent agents)"):
+                    for label, key, bias_field in (
+                        ("News Analyst", "news", "sentiment"),
+                        ("Filings Analyst", "filings", "sentiment"),
+                        ("Price Analyst", "price", "momentum_bias"),
+                    ):
+                        o = opinions.get(key) or {}
+                        bias = (o.get(bias_field) or "n/a").upper()
+                        st.markdown(f"**{label}** — {bias} · conf {o.get('confidence', 'n/a')}/100")
+                        st.caption(o.get("reasoning", ""))
+
+            steps = _loads(c.get("reasoning_steps")) or []
+            if steps:
+                with st.expander("Reasoning Steps"):
+                    for i, step in enumerate(steps, 1):
+                        st.markdown(f"{i}. {step}")
+
+            strat = _loads(c.get("strategy"))
+            if strat:
+                with st.expander(f"Proposed Strategy: {strat['strategy_name']}"):
+                    for leg in strat["legs"]:
+                        st.markdown(
+                            f"- **{leg['action'].upper()}** {leg['type']} @ strike "
+                            f"{leg['strike']} ({leg['symbol']})"
+                        )
+                    st.markdown(
+                        f"Max loss **${strat['max_loss_per_contract']:.2f}** · "
+                        f"max gain **${strat['max_gain_per_contract']:.2f}** · "
+                        f"breakeven **${strat['breakeven']:.2f}**"
+                    )
+            else:
+                st.caption("No strategy proposed (neutral sentiment or no price data).")
+
             if entry["actions"]:
                 for a in entry["actions"]:
                     st.markdown(f"→ Human action: **{a['action']}** ({a['acted_at']}) {a.get('note') or ''}")
