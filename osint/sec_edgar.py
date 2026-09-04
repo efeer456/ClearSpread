@@ -8,6 +8,7 @@ resmi/kamusal beyanlari da sinyale dahil ediyoruz.
 API key gerektirmez, ama SEC "fair access" politikasi geregi gercek bir
 User-Agent (isim + iletisim) istiyor. Rate limit: ~10 req/sn.
 """
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict
 
@@ -31,9 +32,21 @@ def _search(query: str, forms: str, days_back: int, limit: int) -> List[Dict]:
         "enddt": end.isoformat(),
     }
 
-    resp = requests.get(EFTS_URL, params=params, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    # SEC'in full-text search endpoint'i ara sira gecici 500 donuyor. Bu OSINT
+    # katmani opsiyonel bir sinyal kaynagi - erisilemezse tum pipeline'i
+    # dusurmek yerine bos liste donup analiz haber + fiyat ile devam etmeli
+    # (reasoning.py zaten 'veri yok' durumunu ayrica ele aliyor).
+    data = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(EFTS_URL, params=params, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception:
+            if attempt == 2:
+                return []
+            time.sleep(1.5)
 
     hits = data.get("hits", {}).get("hits", [])[:limit]
     results = []

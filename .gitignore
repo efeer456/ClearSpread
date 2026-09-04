@@ -2,4 +2,4 @@
 __pycache__/
 *.pyc
 bin/
-audit_trail.db
+audit_trail*.db

@@ -26,8 +26,8 @@ def submit_debit_spread(strategy: Dict, quantity: int = 1) -> Dict:
         return {
             "submitted": False,
             "reason": (
-                f"Guvenlik limiti asildi: tahmini risk ${estimated_risk:.2f} > "
-                f"izin verilen ${MAX_NOTIONAL_PER_TRADE:.2f}. Miktari azaltin."
+                f"Safety limit exceeded: estimated risk ${estimated_risk:.2f} > "
+                f"allowed ${MAX_NOTIONAL_PER_TRADE:.2f}. Reduce the quantity."
             ),
         }
 
